@@ -1,0 +1,30 @@
+# === 构建产物 ===
+build/
+dist/
+*.exe
+*.spec
+
+# === Python ===
+__pycache__/
+*.pyc
+*.pyo
+
+# === 大媒体文件(视频/音频源素材) ===
+*.mp4
+*.mp3
+*.ogg
+*.flac
+
+# === 测试音频(大文件,CS336 讲座切片 14-28MB 每个) ===
+audio_test/cs336/
+audio_test/roll_verify/
+audio_test/*.wav
+audio_test/*.mp3
+audio_test/en_segs/
+
+# === Claude 工具配置(非项目源码) ===
+.claude/
+
+# === 其它 ===
+*.log
+*.tmp

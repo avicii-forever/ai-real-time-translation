@@ -1,0 +1,24 @@
+diff --git a/tools/server/server-omni.cpp b/tools/server/server-omni.cpp
+index 851038a..e9b75d6 100644
+--- a/tools/server/server-omni.cpp
++++ b/tools/server/server-omni.cpp
+@@ -195,8 +195,8 @@ int main(int argc, char ** argv) {
+         }
+ 
+         // voice clone / assistant prompt
+-        if (data.contains("voice_clone_prompt")) octx->omni_voice_clone_prompt = data["voice_clone_prompt"];
+-        if (data.contains("assistant_prompt")) octx->omni_assistant_prompt = data["assistant_prompt"];
++        if (data.contains("voice_clone_prompt")) { octx->omni_voice_clone_prompt = data["voice_clone_prompt"]; octx->audio_voice_clone_prompt = data["voice_clone_prompt"]; }
++        if (data.contains("assistant_prompt")) { octx->omni_assistant_prompt = data["assistant_prompt"]; octx->audio_assistant_prompt = data["assistant_prompt"]; }
+ 
+         {
+             std::lock_guard<std::mutex> lock(state.octx_mutex);
+@@ -339,7 +339,7 @@ int main(int argc, char ** argv) {
+                 // send done
+                 static const std::string ev_done = "data: [DONE]\n\n";
+                 sink.write(ev_done.data(), ev_done.size());
+-                return true;
++                return false;
+             });
+     });
+ 

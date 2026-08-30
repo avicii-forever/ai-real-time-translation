@@ -1,0 +1,29 @@
+diff --git a/tools/omni/omni.cpp b/tools/omni/omni.cpp
+index 3e029c6..9483f93 100644
+--- a/tools/omni/omni.cpp
++++ b/tools/omni/omni.cpp
+@@ -10372,8 +10372,13 @@ bool stream_prefill(struct omni_context * ctx_omni, std::string aud_fname, std::
+     // 如果不检查这个标志，系统 prompt 会被评估两次，导致格式混乱
+     if (index == 0 && !ctx_omni->system_prompt_initialized) {
+         print_with_timestamp("stream_prefill: n_past = %d\n voice_clone_prompt = %s\n assistant_prompt = %s\n", ctx_omni->n_past, voice_clone_prompt.c_str(), assistant_prompt.c_str());
+-        // tc-todo
+-        // llama_kv_cache_clear(ctx_omni->ctx_llama);
++        // 清理 LLM KV cache，避免跨请求残留旧 KV 导致 LLM 生成死循环
++        {
++            llama_memory_t _mem = llama_get_memory(ctx_omni->ctx_llama);
++            if (_mem) {
++                llama_memory_clear(_mem, false);
++            }
++        }
+         
+         // 🔧 [对齐 Python 双工模型] 初始化格式
+         // Python 双工模型的 _init_duplex_session：
+@@ -10907,7 +10912,7 @@ bool stream_decode(struct omni_context * ctx_omni, std::string debug_dir, int ro
+             // 🔧 [重要] 循环直到收集到 step_size 个有效 token，而不是生成 step_size 个 token
+             // 🔧 [P0-打断检测] 检测 break_event，支持双工模式下的打断
+             // 🔧 [P2-chunk限制] 检测 max_new_speak_tokens_per_chunk，便于及时响应打断
+-            while (jl < step_size && !llm_finish && !ctx_omni->break_event.load() && !chunk_limit_reached) {
++            while (jl < step_size && !llm_finish && !ctx_omni->break_event.load() && !chunk_limit_reached && (il + total_tokens_generated) < max_tgt_len) {
+                 // streaming llm
+                 const char * tmp = nullptr;
+                 float * hidden_states = nullptr;

@@ -1,0 +1,50 @@
+diff --git a/ggml/src/ggml-cann/ggml-cann.cpp b/ggml/src/ggml-cann/ggml-cann.cpp
+index 5f51ea3..648fdf7 100644
+--- a/ggml/src/ggml-cann/ggml-cann.cpp
++++ b/ggml/src/ggml-cann/ggml-cann.cpp
+@@ -1921,11 +1921,17 @@ static bool ggml_cann_compute_forward(ggml_backend_cann_context & ctx, struct gg
+         case GGML_OP_SCALE:
+             ggml_cann_scale(ctx, dst);
+             break;
+-        case GGML_OP_SQR:
+-            GGML_ASSERT(dst->src[1] == nullptr);
++        case GGML_OP_SQR: {
++            // aclnn has no dedicated square op; implement x^2 = x * x by aliasing
++            // src[1] to src[0]. Save/restore src[1] so repeated graph computation
++            // (flow-matching re-runs the graph every step) does not trip on a
++            // stale src[1] or corrupt the graph.
++            ggml_tensor * saved_src1 = dst->src[1];
+             dst->src[1] = dst->src[0];
+             ggml_cann_binary_op<aclnn_mul>(ctx, dst);
++            dst->src[1] = saved_src1;
+             break;
++        }
+         case GGML_OP_SQRT:
+             GGML_CANN_CALL_OP_UNARY(Sqrt);
+             break;
+@@ -2055,8 +2061,8 @@ static const char * ggml_backend_cann_name(ggml_backend_t backend) {
+  */
+ static void ggml_backend_cann_free(ggml_backend_t backend) {
+     ggml_backend_cann_context * cann_ctx = (ggml_backend_cann_context *) backend->context;
++    ggml_cann_set_device(cann_ctx->device);
+     ACL_CHECK(aclrtSynchronizeDevice());
+-    ACL_CHECK(aclrtResetDevice(cann_ctx->device));
+ 
+     delete cann_ctx;
+     delete backend;
+@@ -2081,6 +2087,7 @@ static void ggml_backend_cann_set_tensor_async(ggml_backend_t backend,
+     ggml_backend_cann_context * cann_ctx = (ggml_backend_cann_context *) backend->context;
+     ggml_backend_buffer_t       buf      = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
+ 
++    ggml_cann_set_device(cann_ctx->device);
+     GGML_ASSERT(buf->buft == ggml_backend_cann_buffer_type(cann_ctx->device) && "unsupported buffer type");
+     GGML_ASSERT(!ggml_is_quantized(tensor->type));
+ 
+@@ -2107,6 +2114,7 @@ static void ggml_backend_cann_get_tensor_async(ggml_backend_t      backend,
+     ggml_backend_cann_context * cann_ctx = (ggml_backend_cann_context *) backend->context;
+     ggml_backend_buffer_t       buf      = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
+ 
++    ggml_cann_set_device(cann_ctx->device);
+     GGML_ASSERT(buf->buft == ggml_backend_cann_buffer_type(cann_ctx->device) && "unsupported buffer type");
+     GGML_ASSERT(!ggml_is_quantized(tensor->type));
+ 

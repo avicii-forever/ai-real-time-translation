@@ -1,0 +1,164 @@
+diff --git a/ggml/src/ggml-cann/ggml-cann.cpp b/ggml/src/ggml-cann/ggml-cann.cpp
+index 5f51ea3..648fdf7 100644
+--- a/ggml/src/ggml-cann/ggml-cann.cpp
++++ b/ggml/src/ggml-cann/ggml-cann.cpp
+@@ -1921,11 +1921,17 @@ static bool ggml_cann_compute_forward(ggml_backend_cann_context & ctx, struct gg
+         case GGML_OP_SCALE:
+             ggml_cann_scale(ctx, dst);
+             break;
+-        case GGML_OP_SQR:
+-            GGML_ASSERT(dst->src[1] == nullptr);
++        case GGML_OP_SQR: {
++            // aclnn has no dedicated square op; implement x^2 = x * x by aliasing
++            // src[1] to src[0]. Save/restore src[1] so repeated graph computation
++            // (flow-matching re-runs the graph every step) does not trip on a
++            // stale src[1] or corrupt the graph.
++            ggml_tensor * saved_src1 = dst->src[1];
+             dst->src[1] = dst->src[0];
+             ggml_cann_binary_op<aclnn_mul>(ctx, dst);
++            dst->src[1] = saved_src1;
+             break;
++        }
+         case GGML_OP_SQRT:
+             GGML_CANN_CALL_OP_UNARY(Sqrt);
+             break;
+@@ -2055,8 +2061,8 @@ static const char * ggml_backend_cann_name(ggml_backend_t backend) {
+  */
+ static void ggml_backend_cann_free(ggml_backend_t backend) {
+     ggml_backend_cann_context * cann_ctx = (ggml_backend_cann_context *) backend->context;
++    ggml_cann_set_device(cann_ctx->device);
+     ACL_CHECK(aclrtSynchronizeDevice());
+-    ACL_CHECK(aclrtResetDevice(cann_ctx->device));
+ 
+     delete cann_ctx;
+     delete backend;
+@@ -2081,6 +2087,7 @@ static void ggml_backend_cann_set_tensor_async(ggml_backend_t backend,
+     ggml_backend_cann_context * cann_ctx = (ggml_backend_cann_context *) backend->context;
+     ggml_backend_buffer_t       buf      = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
+ 
++    ggml_cann_set_device(cann_ctx->device);
+     GGML_ASSERT(buf->buft == ggml_backend_cann_buffer_type(cann_ctx->device) && "unsupported buffer type");
+     GGML_ASSERT(!ggml_is_quantized(tensor->type));
+ 
+@@ -2107,6 +2114,7 @@ static void ggml_backend_cann_get_tensor_async(ggml_backend_t      backend,
+     ggml_backend_cann_context * cann_ctx = (ggml_backend_cann_context *) backend->context;
+     ggml_backend_buffer_t       buf      = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
+ 
++    ggml_cann_set_device(cann_ctx->device);
+     GGML_ASSERT(buf->buft == ggml_backend_cann_buffer_type(cann_ctx->device) && "unsupported buffer type");
+     GGML_ASSERT(!ggml_is_quantized(tensor->type));
+ 
+diff --git a/tools/omni/omni.cpp b/tools/omni/omni.cpp
+index 3e029c6..152dc88 100644
+--- a/tools/omni/omni.cpp
++++ b/tools/omni/omni.cpp
+@@ -251,7 +251,13 @@ static bool is_end_token(struct omni_context * ctx, llama_token token) {
+     OmniTokenType type = get_token_type(ctx, token);
+     
+     if (ctx->duplex_mode) {
+-        // 双工模式:
++        // 🔧 [翻译场景 hard-listen] listen_prob_scale<=0.05 时忽略 chunk_eos/chunk_tts_eos,
++        // 像单工一样连续生成到 TTS_EOS/EOS,输出完整翻译而非碎片。
++        if (ctx->listen_prob_scale <= 0.05f) {
++            return type == OmniTokenType::TTS_EOS ||
++                   type == OmniTokenType::EOS;
++        }
++        // 双工模式(正常对话):
+         // - chunk_eos/chunk_tts_eos: 结束当前 stream_decode 调用，Python server 管理多轮
+         // - listen: 结束当前发言段
+         // - turn_eos/tts_eos/eos: 在 stream_decode 内层循环中单独处理（设 llm_finish + is_end_of_turn）
+@@ -1337,7 +1343,12 @@ static const char * sample_with_hidden_and_token(struct common_sampler * smpl, s
+                 // 添加一个偏置值来增加 listen 的概率
+                 // listen_prob_bias = log(listen_prob_scale) ≈ (listen_prob_scale - 1.0) for small values
+                 float listen_bias = (ctx_omni->listen_prob_scale - 1.0f) * 2.0f;  // 放大效果
+-                logits[ctx_omni->special_token_listen] += listen_bias;
++                // 🔧 [翻译场景] listen_prob_scale <= 0.05 视为硬禁 listen：设 -inf 强制出文本
++                if (ctx_omni->listen_prob_scale <= 0.05f) {
++                    logits[ctx_omni->special_token_listen] = -INFINITY;
++                } else {
++                    logits[ctx_omni->special_token_listen] += listen_bias;
++                }
+             }
+             
+             // 2. 🔧 [与 Python 对齐] 禁止采样 <|tts_pad|> token
+@@ -10372,8 +10383,13 @@ bool stream_prefill(struct omni_context * ctx_omni, std::string aud_fname, std::
+     // 如果不检查这个标志，系统 prompt 会被评估两次，导致格式混乱
+     if (index == 0 && !ctx_omni->system_prompt_initialized) {
+         print_with_timestamp("stream_prefill: n_past = %d\n voice_clone_prompt = %s\n assistant_prompt = %s\n", ctx_omni->n_past, voice_clone_prompt.c_str(), assistant_prompt.c_str());
+-        // tc-todo
+-        // llama_kv_cache_clear(ctx_omni->ctx_llama);
++        // 清理 LLM KV cache，避免跨请求残留旧 KV 导致 LLM 生成死循环
++        {
++            llama_memory_t _mem = llama_get_memory(ctx_omni->ctx_llama);
++            if (_mem) {
++                llama_memory_clear(_mem, false);
++            }
++        }
+         
+         // 🔧 [对齐 Python 双工模型] 初始化格式
+         // Python 双工模型的 _init_duplex_session：
+@@ -10907,7 +10923,7 @@ bool stream_decode(struct omni_context * ctx_omni, std::string debug_dir, int ro
+             // 🔧 [重要] 循环直到收集到 step_size 个有效 token，而不是生成 step_size 个 token
+             // 🔧 [P0-打断检测] 检测 break_event，支持双工模式下的打断
+             // 🔧 [P2-chunk限制] 检测 max_new_speak_tokens_per_chunk，便于及时响应打断
+-            while (jl < step_size && !llm_finish && !ctx_omni->break_event.load() && !chunk_limit_reached) {
++            while (jl < step_size && !llm_finish && !ctx_omni->break_event.load() && !chunk_limit_reached && (il + total_tokens_generated) < max_tgt_len) {
+                 // streaming llm
+                 const char * tmp = nullptr;
+                 float * hidden_states = nullptr;
+diff --git a/tools/server/server-omni.cpp b/tools/server/server-omni.cpp
+index 851038a..e9b75d6 100644
+--- a/tools/server/server-omni.cpp
++++ b/tools/server/server-omni.cpp
+@@ -195,8 +195,8 @@ int main(int argc, char ** argv) {
+         }
+ 
+         // voice clone / assistant prompt
+-        if (data.contains("voice_clone_prompt")) octx->omni_voice_clone_prompt = data["voice_clone_prompt"];
+-        if (data.contains("assistant_prompt")) octx->omni_assistant_prompt = data["assistant_prompt"];
++        if (data.contains("voice_clone_prompt")) { octx->omni_voice_clone_prompt = data["voice_clone_prompt"]; octx->audio_voice_clone_prompt = data["voice_clone_prompt"]; }
++        if (data.contains("assistant_prompt")) { octx->omni_assistant_prompt = data["assistant_prompt"]; octx->audio_assistant_prompt = data["assistant_prompt"]; }
+ 
+         {
+             std::lock_guard<std::mutex> lock(state.octx_mutex);
+@@ -339,7 +339,7 @@ int main(int argc, char ** argv) {
+                 // send done
+                 static const std::string ev_done = "data: [DONE]\n\n";
+                 sink.write(ev_done.data(), ev_done.size());
+-                return true;
++                return false;
+             });
+     });
+ 
+diff --git a/tools/server/ws_handler.cpp b/tools/server/ws_handler.cpp
+index 5cf6427..68bdb92 100644
+--- a/tools/server/ws_handler.cpp
++++ b/tools/server/ws_handler.cpp
+@@ -287,7 +287,7 @@ std::string TempMediaFiles::write_audio_wav(const std::string & b64, const std::
+ 
+     // Backend protocol audio payloads are mono float32 PCM in this path.
+     int n_samples = static_cast<int>(pcm.size());
+-    int sample_rate = 16000;
++    int sample_rate = 24000;
+     int n_channels = 1;
+     int bits_per_sample = 32;
+     int byte_rate = sample_rate * n_channels * bits_per_sample / 8;
+@@ -558,8 +558,17 @@ static omni_context * create_session_octx(common_params & params, const ParsedSe
+     apply_session_config(p, octx, init);
+ 
+     // Voice clone / system prompt
++    // system_prompt 同时注入 voice_clone 前缀和 assistant 后缀,
++    // 让 duplex 模式能承载翻译等任务指令(而不只是默认的"Streaming Duplex Conversation")
+     if (!init.system_prompt.empty()) {
+-        octx->omni_assistant_prompt = init.system_prompt;
++        if (duplex_mode) {
++            octx->omni_voice_clone_prompt = "<|im_start|>system\n" + init.system_prompt + "\n<|audio_start|>";
++            octx->audio_voice_clone_prompt = octx->omni_voice_clone_prompt;
++            octx->omni_assistant_prompt = "<|audio_end|><|im_end|>\n";
++            octx->audio_assistant_prompt = octx->omni_assistant_prompt;
++        } else {
++            octx->omni_assistant_prompt = init.system_prompt;
++        }
+     }
+     shared_octx = octx;
+ 
